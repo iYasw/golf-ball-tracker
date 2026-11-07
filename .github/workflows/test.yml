@@ -1,0 +1,37 @@
+name: Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  unit:
+    name: Unit tests (npm test)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: npm test
+
+  browser:
+    name: Browser flow with sample video (Google Chrome)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: npm install --no-save playwright@1.56.1
+      # Google Chrome is preinstalled on GitHub runners and plays H.264 MP4.
+      - run: npm run test:browser
+        env:
+          PW_CHANNEL: chrome

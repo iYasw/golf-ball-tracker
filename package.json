@@ -1,0 +1,12 @@
+{
+  "name": "golf-ball-tracker",
+  "version": "0.2.0",
+  "private": true,
+  "description": "iPhoneで撮影したゴルフ動画から、白いボールの画面上の軌跡を端末内で追跡するWebアプリ",
+  "type": "module",
+  "scripts": {
+    "test": "node --test tests/*.test.mjs",
+    "test:browser": "node tests/browser/run.mjs"
+  },
+  "engines": { "node": ">=18" }
+}

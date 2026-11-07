@@ -1,0 +1,27 @@
+:root{color-scheme:dark;--bg:#0f1712;--card:#18231c;--line:#2e3f33;--text:#eef5ef;--muted:#a5b8aa;--accent:#5fd27a;--path:#ffd84d}
+*{box-sizing:border-box}
+html{-webkit-text-size-adjust:100%;text-size-adjust:100%}
+body{margin:0;background:var(--bg);color:var(--text);font-family:system-ui,-apple-system,sans-serif;line-height:1.5}
+main{max-width:720px;margin:0 auto;padding:max(16px,env(safe-area-inset-top)) 16px max(32px,env(safe-area-inset-bottom))}
+h1{font-size:26px;margin:8px 0 4px}h2{font-size:18px;margin:0 0 10px}
+.lead{color:var(--muted);margin:0 0 16px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:16px;margin:0 0 16px}
+button,.file{font:inherit;font-size:16px;font-weight:650;border:0;border-radius:12px;min-height:46px;padding:10px 16px;background:var(--accent);color:#08210f;cursor:pointer;display:inline-flex;align-items:center;justify-content:center}
+button.secondary,.file+button{background:#2b3a30;color:var(--text)}
+button:disabled{opacity:.45;cursor:not-allowed}
+.file{position:relative;overflow:hidden;margin:0 8px 8px 0}.file input{position:absolute;inset:0;opacity:0;font-size:16px}
+.row{display:flex;gap:8px;flex-wrap:wrap;margin:10px 0}
+.row button{flex:1 1 auto}
+button.icon{flex:0 0 auto;min-width:64px}
+.stage{position:relative;width:100%;background:#000;border-radius:12px;overflow:hidden;touch-action:manipulation}
+.stage video{display:block;width:100%;height:auto}
+.stage canvas{position:absolute;inset:0;width:100%;height:100%;cursor:crosshair}
+input[type=range]{width:100%;margin:6px 0}
+select{font:inherit;font-size:16px;margin-left:8px;padding:6px;border-radius:8px;background:#0f1712;color:var(--text);border:1px solid var(--line)}
+.inline{display:block;color:var(--muted)}
+progress{width:100%;height:10px;accent-color:var(--accent)}
+.note{color:var(--muted);font-size:14px;margin:6px 0}
+.status{white-space:pre-wrap;font-size:15px;margin:8px 0 0}
+.results{display:grid;grid-template-columns:auto 1fr;gap:6px 14px;margin:0}
+.results dt{color:var(--muted)}.results dd{margin:0;font-weight:700;font-variant-numeric:tabular-nums}
+footer{text-align:center}

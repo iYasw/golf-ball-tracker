@@ -22,9 +22,9 @@ export function isBallPixel(r, g, b, o = DEFAULT_OPTIONS) {
   return max >= o.minBrightness && max - min <= o.maxSaturation;
 }
 
-// Finds the candidate blob nearest to `predicted` inside a square window.
+// Scores compact candidate blobs near the prediction, using motion when available.
 // frame: { width, height, data: Uint8ClampedArray RGBA }
-export function findBall(frame, predicted, radius, o = DEFAULT_OPTIONS, previous = null) {
+export function findBall(frame, predicted, radius, o = DEFAULT_OPTIONS, previous = null, motion = null) {
   const { width, height, data } = frame;
   const x0 = Math.max(0, Math.floor(predicted.x - radius)), x1 = Math.min(width - 1, Math.ceil(predicted.x + radius));
   const y0 = Math.max(0, Math.floor(predicted.y - radius)), y1 = Math.min(height - 1, Math.ceil(predicted.y + radius));
@@ -48,12 +48,16 @@ export function findBall(frame, predicted, radius, o = DEFAULT_OPTIONS, previous
   for (let start = 0; start < mask.length; start++) {
     if (mask[start] !== 1) continue;
     // Flood fill one connected blob (4-neighbour).
-    let area = 0, sx = 0, sy = 0, touchesEdge = false;
+    let area = 0, sx = 0, sy = 0, light = 0, minX = w, maxX = 0, minY = h, maxY = 0, touchesEdge = false;
     mask[start] = 2; stack.push(start);
     while (stack.length) {
       const p = stack.pop();
       const px = p % w, py = (p - px) / w;
       area++; sx += px; sy += py;
+      minX = Math.min(minX, px); maxX = Math.max(maxX, px);
+      minY = Math.min(minY, py); maxY = Math.max(maxY, py);
+      const index = ((y0 + py) * width + x0 + px) * 4;
+      light += (data[index] + data[index + 1] + data[index + 2]) / 3;
       if (px === 0 || py === 0 || px === w - 1 || py === h - 1) touchesEdge = true;
       if (px > 0 && mask[p - 1] === 1) { mask[p - 1] = 2; stack.push(p - 1); }
       if (px < w - 1 && mask[p + 1] === 1) { mask[p + 1] = 2; stack.push(p + 1); }
@@ -64,7 +68,21 @@ export function findBall(frame, predicted, radius, o = DEFAULT_OPTIONS, previous
     const cx = x0 + sx / area, cy = y0 + sy / area;
     const d = Math.hypot(cx - predicted.x, cy - predicted.y);
     if (d > radius) continue;
-    const score = d;
+    // A partial resting silhouette can grow under motion blur.
+    const compactness = area / ((maxX - minX + 1) * (maxY - minY + 1));
+    if (compactness < (motion?.launching ? 0.5 : 0.3)) continue;
+    if (motion?.area && (area > motion.area * 3 || (motion.launching && area < motion.area * 0.1))) continue;
+    // Tiny fragments are less reliable than a coherent ball silhouette.
+    let score = d + (motion?.area ? 25 * (1 - Math.min(1, area / (motion.area * 0.15))) : 0);
+    if (motion?.length > 3) {
+      const dx = cx - motion.last.x, dy = cy - motion.last.y;
+      const travel = Math.hypot(dx, dy);
+      const along = (dx * motion.v.x + dy * motion.v.y) / motion.length;
+      const across = Math.abs(dx * motion.v.y - dy * motion.v.x) / motion.length;
+      if (along < travel * 0.5 || across > Math.max(o.searchRadius / 2, motion.length * 0.4)) continue;
+      score += (travel - along) * 2;
+    }
+    score += (1 - compactness) * 20 + Math.max(0, 180 - light / area) * 0.5;
     if (!best || score < best.score) best = { x: cx, y: cy, area, score };
   }
   return best && { x: best.x, y: best.y, area: best.area };
@@ -96,6 +114,7 @@ export function createTracker(start, options = {}) {
   let launched = false;
   let waitFrames = 0;
   let firstDetection = null;
+  let ballArea = null;
 
   function step(frame, time) {
     if (finished) return { done: true };
@@ -105,11 +124,20 @@ export function createTracker(start, options = {}) {
     const initializing = !launched;
     if (initializing) waitFrames++;
     const predicted = initializing ? start : { x: last.x + velocity.x * (misses + 1), y: last.y + velocity.y * (misses + 1) };
-    const radius = Math.min(o.searchRadius * (initializing ? 2.5 : 1) * Math.pow(o.missGrowth, misses), Math.max(frame.width, frame.height));
+    // The first full flight step can be much longer than the impact step.
+    const baseRadius = Math.max(o.searchRadius * (initializing ? 2.5 : 1), Math.hypot(velocity.x, velocity.y) * 2.5);
+    const radius = Math.min(baseRadius * Math.pow(o.missGrowth, misses), Math.max(frame.width, frame.height));
     const reference = previous && previous.width === frame.width && previous.height === frame.height ? previous : null;
     // Keep visible still points so summaries can locate the start of launch.
-    let hit = initializing ? findBall(frame, start, o.searchRadius / 2, o) : null;
-    if (!hit) hit = findBall(frame, predicted, radius, o, reference);
+    const motion = { launching: initializing, last, v: velocity, length: Math.hypot(velocity.x, velocity.y), area: ballArea };
+    let hit = null;
+    if (initializing) {
+      // Once located, include the shaded ball without including colored grass.
+      const stillOptions = ballArea ? { ...o, minBrightness: Math.min(o.minBrightness, 130), maxSaturation: Math.min(o.maxSaturation, 30) } : o;
+      const stillHit = findBall(frame, start, o.searchRadius / 2, stillOptions);
+      if (stillHit && (!firstDetection || Math.hypot(stillHit.x - firstDetection.x, stillHit.y - firstDetection.y) < Math.max(3, Math.sqrt(firstDetection.area)) && stillHit.area > firstDetection.area * 0.4)) hit = stillHit;
+    }
+    if (!hit) hit = findBall(frame, predicted, radius, o, reference, motion);
     // Video/canvas buffers may be reused by the caller.
     previous = { width: frame.width, height: frame.height, data: new Uint8ClampedArray(frame.data) };
     if (!hit) {
@@ -119,9 +147,11 @@ export function createTracker(start, options = {}) {
       } else if (waitFrames >= o.maxWaitFrames) finished = true;
       return { found: false, done: finished, predicted };
     }
-    const still = initializing && Math.hypot(hit.x - start.x, hit.y - start.y) < 3;
+    const still = initializing && (!firstDetection || Math.hypot(hit.x - firstDetection.x, hit.y - firstDetection.y) < Math.max(3, Math.sqrt(firstDetection.area)));
     if (!firstDetection) firstDetection = hit;
-    if (initializing && Math.hypot(hit.x - firstDetection.x, hit.y - firstDetection.y) >= 3) launched = true;
+    if (initializing && hit === firstDetection) ballArea = hit.area;
+    if (still) ballArea = Math.max(ballArea ?? 0, hit.area);
+    if (initializing && !still) launched = true;
     if (points.length && !still) {
       const steps = misses + 1;
       const v = { x: (hit.x - last.x) / steps, y: (hit.y - last.y) / steps };

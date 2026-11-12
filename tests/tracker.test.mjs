@@ -205,3 +205,44 @@ test('limits waiting by distinct frames even when the still ball is visible', ()
     assert.equal(tracker.finished, true);
   }
 });
+
+const deceleratingFlight = [
+  { x: 100, y: 1200 }, { x: 120, y: 1097 }, { x: 160, y: 850 },
+  { x: 190, y: 683 }, { x: 210, y: 555 }, { x: 230, y: 472 },
+  { x: 240, y: 393 }
+];
+
+for (const distraction of ['none', 'trailing club', 'static balls']) {
+  test(`tracks large decelerating jumps with ${distraction}`, () => {
+    const tracker = createTracker(deceleratingFlight[0]);
+    for (const [i, position] of deceleratingFlight.entries()) {
+      const balls = [{ ...position, r: 9 }];
+      if (distraction === 'trailing club' && i) {
+        balls.push({ x: position.x - 8, y: position.y + 65, r: 18, value: 100 });
+      }
+      if (distraction === 'static balls') {
+        balls.push({ x: 50, y: 1250, r: 9 }, { x: 185, y: 700, r: 9 }, { x: 260, y: 480, r: 9 });
+      }
+      const image = frame({ width: 400, height: 1300, balls });
+      for (let repeat = 0; repeat < 4; repeat++) {
+        const result = tracker.step(image, (i * 4 + repeat) / 30);
+        if (repeat) assert.equal(result.duplicate, true);
+        else {
+          assert.equal(result.found, true, `frame ${i}`);
+          assert.ok(Math.hypot(result.point.x - position.x, result.point.y - position.y) < 3, `frame ${i}`);
+        }
+      }
+    }
+    assert.equal(tracker.points.length, deceleratingFlight.length);
+  });
+}
+
+test('does not mistake a new speck near the start for a ball already in flight', () => {
+  const start = { x: 100, y: 200 };
+  const tracker = createTracker(start);
+  tracker.step(frame({ balls: [start] }), 0);
+  const position = { x: 112, y: 127 };
+  const result = tracker.step(frame({ balls: [position, { x: 94, y: 197, r: 1 }] }), 4 / 30);
+  assert.equal(result.found, true);
+  assert.ok(Math.hypot(result.point.x - position.x, result.point.y - position.y) < 3);
+});

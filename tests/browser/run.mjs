@@ -67,9 +67,8 @@ try {
   // Tap the ball at video pixel (100, 620).
   const box = await page.locator('#overlay').boundingBox();
   await page.mouse.click(box.x + 100 / 1280 * box.width, box.y + 620 / 720 * box.height);
-  check(await page.isEnabled('#track'), 'start position set by tapping');
+  check(await page.evaluate(() => !!window.golfTracker.start && window.golfTracker.tracking), 'tap sets start position and starts tracking automatically');
 
-  await page.click('#track');
   await page.waitForFunction(() => !window.golfTracker.tracking && window.golfTracker.points.length > 0, null, { timeout: 60000 });
   const { points, summary } = await page.evaluate(() => ({ points: window.golfTracker.points, summary: window.golfTracker.summary }));
   const moving = points.filter(p => p.time > 0.25 + 1e-6);

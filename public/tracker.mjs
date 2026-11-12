@@ -71,6 +71,8 @@ export function findBall(frame, predicted, radius, o = DEFAULT_OPTIONS, previous
     // A partial resting silhouette can grow under motion blur.
     const compactness = area / ((maxX - minX + 1) * (maxY - minY + 1));
     if (compactness < (motion?.launching ? 0.5 : 0.3)) continue;
+    if (motion?.launching && Math.max(maxX - minX + 1, maxY - minY + 1) > Math.min(maxX - minX + 1, maxY - minY + 1) * 4) continue;
+    if (motion?.brightness && light / area < Math.max(110, motion.brightness * 0.55)) continue;
     if (motion?.area && (area > motion.area * 3 || (motion.launching && area < motion.area * 0.1))) continue;
     // Tiny fragments are less reliable than a coherent ball silhouette.
     let score = d + (motion?.area ? 25 * (1 - Math.min(1, area / (motion.area * 0.15))) : 0);
@@ -83,9 +85,9 @@ export function findBall(frame, predicted, radius, o = DEFAULT_OPTIONS, previous
       score += (travel - along) * 2;
     }
     score += (1 - compactness) * 20 + Math.max(0, 180 - light / area) * 0.5;
-    if (!best || score < best.score) best = { x: cx, y: cy, area, score };
+    if (!best || score < best.score) best = { x: cx, y: cy, area, brightness: light / area, score };
   }
-  return best && { x: best.x, y: best.y, area: best.area };
+  return best && { x: best.x, y: best.y, area: best.area, brightness: best.brightness };
 }
 
 // Sample a dense grid so small moving balls still distinguish otherwise static frames.
@@ -111,37 +113,58 @@ export function createTracker(start, options = {}) {
   let last = { x: start.x, y: start.y };
   let finished = false;
   let previous = null;
+  let following = false;
   let launched = false;
   let waitFrames = 0;
   let firstDetection = null;
   let ballArea = null;
+  let tee = null;
+  let absentFrames = 0;
+  let lastStillCount = 0;
+  let tentative = false;
 
   function step(frame, time) {
     if (finished) return { done: true };
     if (previous && frameDifference(frame, previous) <= o.duplicateThreshold) {
       return { found: false, duplicate: true, done: false };
     }
-    const initializing = !launched;
+    // Check the original silhouette before considering nearby motion.
+    let stillHit = null;
+    if (tee || !following) {
+      const stillOptions = tee ? { ...o, minBrightness: Math.min(o.minBrightness, 130), maxSaturation: Math.min(o.maxSaturation, 30) } : { ...o, minBrightness: Math.min(o.minBrightness, 160), maxSaturation: Math.min(o.maxSaturation, 30) };
+      const candidate = findBall(frame, tee ?? start, o.searchRadius / 2, stillOptions);
+      if (candidate && (!tee || (Math.hypot(candidate.x - tee.x, candidate.y - tee.y) < Math.max(3, Math.sqrt(tee.area) * 0.45)
+        && candidate.area > tee.area * 0.4 && candidate.area < tee.area * 3
+        && candidate.brightness >= tee.brightness * 0.7))) stillHit = candidate;
+    }
+    if (stillHit && (!following || tentative)) {
+      if (tentative) {
+        points.length = lastStillCount;
+        last = { x: tee.x, y: tee.y };
+        velocity = { x: 0, y: 0 };
+        misses = 0;
+        following = false;
+        launched = false;
+        tentative = false;
+      }
+      absentFrames = 0;
+      if (!tee) tee = { ...stillHit };
+    } else if (tee) absentFrames++;
+    const initializing = !following;
     if (initializing) waitFrames++;
     const predicted = initializing ? start : { x: last.x + velocity.x * (misses + 1), y: last.y + velocity.y * (misses + 1) };
     // The first full flight step can be much longer than the impact step.
     const baseRadius = Math.max(o.searchRadius * (initializing ? 2.5 : 1), Math.hypot(velocity.x, velocity.y) * 2.5);
     const radius = Math.min(baseRadius * Math.pow(o.missGrowth, misses), Math.max(frame.width, frame.height));
     const reference = previous && previous.width === frame.width && previous.height === frame.height ? previous : null;
-    // Keep visible still points so summaries can locate the start of launch.
-    const motion = { launching: initializing, last, v: velocity, length: Math.hypot(velocity.x, velocity.y), area: ballArea };
-    let hit = null;
-    if (initializing) {
-      // Once located, include the shaded ball without including colored grass.
-      const stillOptions = ballArea ? { ...o, minBrightness: Math.min(o.minBrightness, 130), maxSaturation: Math.min(o.maxSaturation, 30) } : o;
-      const stillHit = findBall(frame, start, o.searchRadius / 2, stillOptions);
-      if (stillHit && (!firstDetection || Math.hypot(stillHit.x - firstDetection.x, stillHit.y - firstDetection.y) < Math.max(3, Math.sqrt(firstDetection.area)) && stillHit.area > firstDetection.area * 0.4)) hit = stillHit;
-    }
-    if (!hit) hit = findBall(frame, predicted, radius, o, reference, motion);
+    // Early flight points remain provisional while the club could be hiding the ball.
+    const motion = { launching: initializing, last, v: velocity, length: Math.hypot(velocity.x, velocity.y), area: ballArea, brightness: initializing ? tee?.brightness : null };
+    let hit = initializing && stillHit ? stillHit : reference ? findBall(frame, predicted, radius, o, reference, motion) : null;
+    if (tee && hit && hit !== stillHit && Math.hypot(hit.x - tee.x, hit.y - tee.y) < Math.max(3, Math.sqrt(tee.area) * 0.5)) hit = null;
     // Video/canvas buffers may be reused by the caller.
     previous = { width: frame.width, height: frame.height, data: new Uint8ClampedArray(frame.data) };
     if (!hit) {
-      if (launched) {
+      if (following) {
         misses++;
         if (misses > o.maxMisses) finished = true;
       } else if (waitFrames >= o.maxWaitFrames) finished = true;
@@ -151,7 +174,9 @@ export function createTracker(start, options = {}) {
     if (!firstDetection) firstDetection = hit;
     if (initializing && hit === firstDetection) ballArea = hit.area;
     if (still) ballArea = Math.max(ballArea ?? 0, hit.area);
-    if (initializing && !still) launched = true;
+    if (initializing && !still) { following = true; tentative = !!tee; }
+    if (following && (!tee || absentFrames >= 2)) launched = true;
+    if (tentative && absentFrames >= 2 && Math.hypot(hit.x - tee.x, hit.y - tee.y) > o.searchRadius * 2) tentative = false;
     if (points.length && !still) {
       const steps = misses + 1;
       const v = { x: (hit.x - last.x) / steps, y: (hit.y - last.y) / steps };
@@ -161,11 +186,12 @@ export function createTracker(start, options = {}) {
     misses = 0;
     last = { x: hit.x, y: hit.y };
     points.push({ x: hit.x, y: hit.y, time, area: hit.area });
-    if (!launched && waitFrames >= o.maxWaitFrames) finished = true;
+    if (still) lastStillCount = points.length;
+    if (!following && waitFrames >= o.maxWaitFrames) finished = true;
     return { found: true, done: finished, point: points[points.length - 1] };
   }
 
-  return { step, points, get finished() { return finished; } };
+  return { step, points, get finished() { return finished; }, get launched() { return launched; } };
 }
 
 // Screen-space values from the tracked points (観測値). time is media time in seconds.

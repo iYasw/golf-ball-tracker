@@ -37,10 +37,10 @@ iPhone（iPhone 15 Pro を想定）で撮影したゴルフ動画から、白い
 - `tests/tracker.test.mjs` … 単体テスト（`npm test`。ブラウザ・ffmpeg 不要）
 - `tests/browser/run.mjs` … ブラウザでの一連の操作テスト（`npm run test:browser`。Playwright が必要）
 
-## 公開（Cloudflare Pages）
-- 本番ブランチ：`main`
-- ビルドコマンド：`npm test`
-- 出力ディレクトリ：`public`
+## 公開（Cloudflare Workers の静的アセット）
+- `wrangler.jsonc` で `public` をそのまま配信（サーバーの処理なし）
+- Cloudflare の Git 連携：本番ブランチ `main`、ビルドコマンド `npm test`、デプロイコマンド `npx wrangler deploy`
+- Cloudflare Pages で公開する場合は、ビルドコマンド `npm test`・出力ディレクトリ `public`
 
 ## 検証状況
 - 単体テスト 19 件：合格

@@ -19,15 +19,17 @@ const server = http.createServer((req, res) => {
   const m = /bytes=(\d*)-(\d*)/.exec(req.headers.range || '');
   if (m) {
     const start = m[1] ? Number(m[1]) : 0, end = m[2] ? Number(m[2]) : size - 1;
-    res.writeHead(206, { 'Content-Type': type, 'Content-Range': `bytes ${start}-${end}/${size}`, 'Accept-Ranges': 'bytes', 'Content-Length': end - start + 1 });
+    res.writeHead(206, { 'Content-Type': type, 'Content-Range': `bytes ${start}-${end}/${size}`, 'Content-Length': end - start + 1 });
     fs.createReadStream(file, { start, end }).pipe(res);
   } else {
-    res.writeHead(200, { 'Content-Type': type, 'Content-Length': size, 'Accept-Ranges': 'bytes' });
+    // Like Cloudflare Pages: full responses do not advertise Accept-Ranges.
+    res.writeHead(200, { 'Content-Type': type, 'Content-Length': size });
     fs.createReadStream(file).pipe(res);
   }
 });
 await new Promise(r => server.listen(0, '127.0.0.1', r));
-const url = `http://127.0.0.1:${server.address().port}/`;
+// LIVE_URL runs the same checks against the published site.
+const url = process.env.LIVE_URL || `http://127.0.0.1:${server.address().port}/`;
 
 const truth = t => {
   if (t < 0.25) return { x: 100, y: 620 };

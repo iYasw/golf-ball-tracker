@@ -5,8 +5,12 @@
 export const DEFAULT_OPTIONS = Object.freeze({
   minBrightness: 185,   // brightest RGB channel of a ball pixel (0-255)
   maxSaturation: 70,    // max - min of RGB; a white ball has little color
+  minChange: 25,       // mean RGB change for a moving ball pixel
+  motionSaturation: 40, // reject colored background exposed by the moving ball
+  duplicateThreshold: 0.001, // sampled mean RGB difference
   searchRadius: 60,     // search window around the predicted position (px)
   missGrowth: 1.6,      // search window growth per missed frame
+  maxWaitFrames: 600,  // distinct frames allowed before launch
   maxMisses: 6,         // stop after this many frames without the ball
   minArea: 3,           // smallest blob (pixels) that can be the ball
   maxArea: 2500,        // larger white areas (shirts, sky, lines) are not the ball
@@ -18,9 +22,9 @@ export function isBallPixel(r, g, b, o = DEFAULT_OPTIONS) {
   return max >= o.minBrightness && max - min <= o.maxSaturation;
 }
 
-// Finds the white blob nearest to `predicted` inside a square window.
+// Scores compact candidate blobs near the prediction, using motion when available.
 // frame: { width, height, data: Uint8ClampedArray RGBA }
-export function findBall(frame, predicted, radius, o = DEFAULT_OPTIONS) {
+export function findBall(frame, predicted, radius, o = DEFAULT_OPTIONS, previous = null, motion = null) {
   const { width, height, data } = frame;
   const x0 = Math.max(0, Math.floor(predicted.x - radius)), x1 = Math.min(width - 1, Math.ceil(predicted.x + radius));
   const y0 = Math.max(0, Math.floor(predicted.y - radius)), y1 = Math.min(height - 1, Math.ceil(predicted.y + radius));
@@ -30,7 +34,13 @@ export function findBall(frame, predicted, radius, o = DEFAULT_OPTIONS) {
   for (let y = y0; y <= y1; y++) {
     for (let x = x0; x <= x1; x++) {
       const i = (y * width + x) * 4;
-      if (isBallPixel(data[i], data[i + 1], data[i + 2], o)) mask[(y - y0) * w + (x - x0)] = 1;
+      const r = data[i], g = data[i + 1], b = data[i + 2];
+      const candidate = previous
+        ? Math.max(r, g, b) - Math.min(r, g, b) <= Math.min(o.maxSaturation, o.motionSaturation)
+          && (Math.abs(r - previous.data[i]) + Math.abs(g - previous.data[i + 1])
+            + Math.abs(b - previous.data[i + 2])) / 3 >= o.minChange
+        : isBallPixel(r, g, b, o);
+      if (candidate) mask[(y - y0) * w + (x - x0)] = 1;
     }
   }
   let best = null;
@@ -38,27 +48,58 @@ export function findBall(frame, predicted, radius, o = DEFAULT_OPTIONS) {
   for (let start = 0; start < mask.length; start++) {
     if (mask[start] !== 1) continue;
     // Flood fill one connected blob (4-neighbour).
-    let area = 0, sx = 0, sy = 0, touchesEdge = false;
+    let area = 0, sx = 0, sy = 0, light = 0, minX = w, maxX = 0, minY = h, maxY = 0, touchesEdge = false;
     mask[start] = 2; stack.push(start);
     while (stack.length) {
       const p = stack.pop();
       const px = p % w, py = (p - px) / w;
       area++; sx += px; sy += py;
+      minX = Math.min(minX, px); maxX = Math.max(maxX, px);
+      minY = Math.min(minY, py); maxY = Math.max(maxY, py);
+      const index = ((y0 + py) * width + x0 + px) * 4;
+      light += (data[index] + data[index + 1] + data[index + 2]) / 3;
       if (px === 0 || py === 0 || px === w - 1 || py === h - 1) touchesEdge = true;
       if (px > 0 && mask[p - 1] === 1) { mask[p - 1] = 2; stack.push(p - 1); }
       if (px < w - 1 && mask[p + 1] === 1) { mask[p + 1] = 2; stack.push(p + 1); }
       if (py > 0 && mask[p - w] === 1) { mask[p - w] = 2; stack.push(p - w); }
       if (py < h - 1 && mask[p + w] === 1) { mask[p + w] = 2; stack.push(p + w); }
     }
-    if (area < o.minArea || area > o.maxArea) continue;
+    if (area < o.minArea || area > o.maxArea || touchesEdge) continue;
     const cx = x0 + sx / area, cy = y0 + sy / area;
     const d = Math.hypot(cx - predicted.x, cy - predicted.y);
     if (d > radius) continue;
-    // A blob cut by the window edge may be a large white object; prefer whole blobs.
-    const score = d + (touchesEdge ? radius : 0);
+    // A partial resting silhouette can grow under motion blur.
+    const compactness = area / ((maxX - minX + 1) * (maxY - minY + 1));
+    if (compactness < (motion?.launching ? 0.5 : 0.3)) continue;
+    if (motion?.area && (area > motion.area * 3 || (motion.launching && area < motion.area * 0.1))) continue;
+    // Tiny fragments are less reliable than a coherent ball silhouette.
+    let score = d + (motion?.area ? 25 * (1 - Math.min(1, area / (motion.area * 0.15))) : 0);
+    if (motion?.length > 3) {
+      const dx = cx - motion.last.x, dy = cy - motion.last.y;
+      const travel = Math.hypot(dx, dy);
+      const along = (dx * motion.v.x + dy * motion.v.y) / motion.length;
+      const across = Math.abs(dx * motion.v.y - dy * motion.v.x) / motion.length;
+      if (along < travel * 0.5 || across > Math.max(o.searchRadius / 2, motion.length * 0.4)) continue;
+      score += (travel - along) * 2;
+    }
+    score += (1 - compactness) * 20 + Math.max(0, 180 - light / area) * 0.5;
     if (!best || score < best.score) best = { x: cx, y: cy, area, score };
   }
   return best && { x: best.x, y: best.y, area: best.area };
+}
+
+// Sample a dense grid so small moving balls still distinguish otherwise static frames.
+function frameDifference(frame, previous) {
+  if (frame.width !== previous.width || frame.height !== previous.height) return Infinity;
+  let total = 0, samples = 0;
+  for (let y = 0; y < frame.height; y += 4) {
+    for (let x = 0; x < frame.width; x += 4) {
+      const i = (y * frame.width + x) * 4;
+      for (let c = 0; c < 3; c++) total += Math.abs(frame.data[i + c] - previous.data[i + c]);
+      samples += 3;
+    }
+  }
+  return total / samples;
 }
 
 // Tracks frame by frame from a manually chosen start position.
@@ -69,27 +110,59 @@ export function createTracker(start, options = {}) {
   let misses = 0;
   let last = { x: start.x, y: start.y };
   let finished = false;
+  let previous = null;
+  let launched = false;
+  let waitFrames = 0;
+  let firstDetection = null;
+  let ballArea = null;
 
   function step(frame, time) {
     if (finished) return { done: true };
-    const predicted = { x: last.x + velocity.x * (misses + 1), y: last.y + velocity.y * (misses + 1) };
-    const radius = Math.min(o.searchRadius * Math.pow(o.missGrowth, misses), Math.max(frame.width, frame.height));
-    const hit = findBall(frame, points.length ? predicted : start, points.length ? radius : o.searchRadius / 2, o);
+    if (previous && frameDifference(frame, previous) <= o.duplicateThreshold) {
+      return { found: false, duplicate: true, done: false };
+    }
+    const initializing = !launched;
+    if (initializing) waitFrames++;
+    const predicted = initializing ? start : { x: last.x + velocity.x * (misses + 1), y: last.y + velocity.y * (misses + 1) };
+    // The first full flight step can be much longer than the impact step.
+    const baseRadius = Math.max(o.searchRadius * (initializing ? 2.5 : 1), Math.hypot(velocity.x, velocity.y) * 2.5);
+    const radius = Math.min(baseRadius * Math.pow(o.missGrowth, misses), Math.max(frame.width, frame.height));
+    const reference = previous && previous.width === frame.width && previous.height === frame.height ? previous : null;
+    // Keep visible still points so summaries can locate the start of launch.
+    const motion = { launching: initializing, last, v: velocity, length: Math.hypot(velocity.x, velocity.y), area: ballArea };
+    let hit = null;
+    if (initializing) {
+      // Once located, include the shaded ball without including colored grass.
+      const stillOptions = ballArea ? { ...o, minBrightness: Math.min(o.minBrightness, 130), maxSaturation: Math.min(o.maxSaturation, 30) } : o;
+      const stillHit = findBall(frame, start, o.searchRadius / 2, stillOptions);
+      if (stillHit && (!firstDetection || Math.hypot(stillHit.x - firstDetection.x, stillHit.y - firstDetection.y) < Math.max(3, Math.sqrt(firstDetection.area)) && stillHit.area > firstDetection.area * 0.4)) hit = stillHit;
+    }
+    if (!hit) hit = findBall(frame, predicted, radius, o, reference, motion);
+    // Video/canvas buffers may be reused by the caller.
+    previous = { width: frame.width, height: frame.height, data: new Uint8ClampedArray(frame.data) };
     if (!hit) {
-      misses++;
-      if (misses > o.maxMisses) finished = true;
+      if (launched) {
+        misses++;
+        if (misses > o.maxMisses) finished = true;
+      } else if (waitFrames >= o.maxWaitFrames) finished = true;
       return { found: false, done: finished, predicted };
     }
-    if (points.length) {
+    const still = initializing && (!firstDetection || Math.hypot(hit.x - firstDetection.x, hit.y - firstDetection.y) < Math.max(3, Math.sqrt(firstDetection.area)));
+    if (!firstDetection) firstDetection = hit;
+    if (initializing && hit === firstDetection) ballArea = hit.area;
+    if (still) ballArea = Math.max(ballArea ?? 0, hit.area);
+    if (initializing && !still) launched = true;
+    if (points.length && !still) {
       const steps = misses + 1;
       const v = { x: (hit.x - last.x) / steps, y: (hit.y - last.y) / steps };
       // Smooth the velocity so one noisy detection does not throw the prediction off.
-      velocity = points.length === 1 ? v : { x: velocity.x * 0.4 + v.x * 0.6, y: velocity.y * 0.4 + v.y * 0.6 };
+      velocity = points.length === 1 ? v : { x: velocity.x * 0.2 + v.x * 0.8, y: velocity.y * 0.2 + v.y * 0.8 };
     }
     misses = 0;
     last = { x: hit.x, y: hit.y };
     points.push({ x: hit.x, y: hit.y, time, area: hit.area });
-    return { found: true, done: false, point: points[points.length - 1] };
+    if (!launched && waitFrames >= o.maxWaitFrames) finished = true;
+    return { found: true, done: finished, point: points[points.length - 1] };
   }
 
   return { step, points, get finished() { return finished; } };

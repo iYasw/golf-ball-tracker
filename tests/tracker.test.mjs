@@ -22,7 +22,7 @@ function frame({ width = 640, height = 360, balls = [], rects = [], noise = 0, s
         else if (d <= r + 1) paint(x, y, 150); // soft edge, like a compressed video
       }
   }
-  for (const q of rects) for (let y = q.y; y < q.y + q.h; y++) for (let x = q.x; x < q.x + q.w; x++) paint(x, y, 250);
+  for (const q of rects) for (let y = q.y; y < q.y + q.h; y++) for (let x = q.x; x < q.x + q.w; x++) paint(x, y, q.value ?? 250);
   return { width, height, data };
 }
 
@@ -245,4 +245,60 @@ test('does not mistake a new speck near the start for a ball already in flight',
   const result = tracker.step(frame({ balls: [position, { x: 94, y: 197, r: 1 }] }), 4 / 30);
   assert.equal(result.found, true);
   assert.ok(Math.hypot(result.point.x - position.x, result.point.y - position.y) < 3);
+});
+
+
+for (const occlusion of [1, 3]) {
+  test(`ignores club and shaft at address, recovers after ${occlusion} hidden frames`, () => {
+    const start = { x: 120, y: 260 };
+    const tracker = createTracker(start);
+    const image = (i, balls) => frame({ balls, noise: 4, seed: i + 1,
+      rects: [{ x: 135 + i % 30, y: 270, w: 30, h: 18, value: 80 },
+        { x: 150 + i % 30, y: 270, w: 2, h: 75, value: 170 }] });
+    for (let i = 0; i < 60; i++) tracker.step(image(i, [start]), i / 60);
+    for (let i = 60; i < 60 + occlusion; i++) {
+      // A ball-sized reflection can briefly tempt the motion tracker.
+      const reflection = { x: 140 + (i - 60) * 12, y: 230, value: 160 };
+      const f = image(i, [reflection]);
+      tracker.step(f, i / 60);
+      assert.equal(tracker.step(f, (i + 0.25) / 60).duplicate, true);
+    }
+    const resumed = 60 + occlusion;
+    tracker.step(image(resumed, [start]), resumed / 60);
+    assert.equal(tracker.points.length, 61, 'tentative points removed when tee ball returns');
+    assert.ok(tracker.points.every(p => Math.hypot(p.x - start.x, p.y - start.y) < 1));
+    for (let i = 1; i <= 12; i++) {
+      const ball = { x: start.x + i * 12, y: start.y - i * 9 };
+      tracker.step(image(resumed + i, [ball]), (resumed + i) / 60);
+    }
+    const flightPoints = tracker.points.filter(p => p.time > resumed / 60);
+    assert.equal(flightPoints.length, 12);
+    flightPoints.forEach((p, i) => assert.ok(Math.hypot(p.x - start.x - (i + 1) * 12, p.y - start.y + (i + 1) * 9) < 1));
+    assert.equal(summarize(tracker.points).launchTime, resumed / 60);
+  });
+}
+
+
+test('confirms launch only after two distinct frames without the tee ball', () => {
+  const start = { x: 100, y: 250 };
+  const tracker = createTracker(start);
+  tracker.step(frame({ balls: [start] }), 0);
+  const first = frame({ balls: [{ x: 120, y: 230 }] });
+  tracker.step(first, 1);
+  assert.equal(tracker.launched, false);
+  tracker.step(first, 1.1);
+  assert.equal(tracker.launched, false, 'duplicates do not confirm launch');
+  tracker.step(frame({ balls: [{ x: 140, y: 210 }] }), 2);
+  assert.equal(tracker.launched, true);
+});
+
+test('acquires a shaded ball at the tap before nearby motion', () => {
+  const start = { x: 100, y: 250 };
+  const tracker = createTracker(start);
+  for (let i = 0; i < 30; i++) {
+    tracker.step(frame({ balls: [{ ...start, value: 175 }, { x: 130 + i, y: 240, r: 12, value: 85 }], noise: 4, seed: i + 1 }), i / 60);
+  }
+  assert.equal(tracker.points.length, 30);
+  assert.equal(tracker.launched, false);
+  assert.ok(tracker.points.every(p => Math.hypot(p.x - start.x, p.y - start.y) < 1));
 });

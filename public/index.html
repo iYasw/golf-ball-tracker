@@ -2,7 +2,7 @@
 <html lang="ja">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
 <meta name="theme-color" content="#0f1712">
 <title>Golf Ball Tracker</title>
 <link rel="stylesheet" href="style.css">
@@ -47,10 +47,10 @@
 
   <section class="card" id="trackCard" hidden>
     <h2>2. 開始位置を指定して追跡</h2>
-    <p class="note">ボールが打たれる直前のフレームに合わせ、動画のボールをタップしてください。</p>
+    <p class="note">アドレス時や打たれる直前のボールをタップすると、自動で追跡を開始します。</p>
     <p id="startInfo" class="note" role="status">開始位置：未指定</p>
     <div class="row">
-      <button id="track" type="button" disabled>追跡を開始</button>
+      <button id="track" type="button" disabled>もう一度追跡</button>
       <button id="stop" type="button" class="secondary" disabled>停止</button>
       <button id="clear" type="button" class="secondary">軌跡を消去</button>
     </div>

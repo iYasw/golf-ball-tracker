@@ -108,6 +108,7 @@ overlay.addEventListener('click', e => {
   $('startInfo').textContent = '開始位置：x ' + state.start.x.toFixed(0) + ' / y ' + state.start.y.toFixed(0) + ' px（' + state.start.time.toFixed(3) + ' 秒）';
   $('track').disabled = false;
   draw();
+  startTracking();
 });
 
 // ---- Tracking ----
@@ -122,7 +123,7 @@ function grabFrame() {
   return { frame: actx.getImageData(0, 0, analysis.width, analysis.height), scale };
 }
 
-$('track').addEventListener('click', async () => {
+async function startTracking() {
   if (!state.start || state.tracking) return;
   video.pause();
   state.tracking = true; state.stopRequested = false; state.points = [];
@@ -141,7 +142,7 @@ $('track').addEventListener('click', async () => {
       await seek(Math.min((k + 0.5) / rate, video.duration - 1e-4));
       const { frame } = grabFrame();
       const r = tracker.step(frame, k / rate);
-      if (r.found) state.points.push({ x: r.point.x / scale, y: r.point.y / scale, time: r.point.time });
+      state.points = tracker.points.map(p => ({ x: p.x / scale, y: p.y / scale, time: p.time }));
       frames++;
       $('progress').value = Math.round((k - firstFrame) / Math.max(1, lastFrame - firstFrame) * 100);
       setStatus('追跡中… ' + state.points.length + ' 点（' + (k / rate).toFixed(3) + ' 秒）');
@@ -161,7 +162,8 @@ $('track').addEventListener('click', async () => {
   }
   showResults();
   draw();
-});
+}
+$('track').addEventListener('click', startTracking);
 $('stop').addEventListener('click', () => { state.stopRequested = true; });
 $('clear').addEventListener('click', () => { resetTrack(); draw(); });
 

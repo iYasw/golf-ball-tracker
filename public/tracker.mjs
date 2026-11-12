@@ -10,6 +10,7 @@ export const DEFAULT_OPTIONS = Object.freeze({
   duplicateThreshold: 0.001, // sampled mean RGB difference
   searchRadius: 60,     // search window around the predicted position (px)
   missGrowth: 1.6,      // search window growth per missed frame
+  maxWaitFrames: 600,  // distinct frames allowed before launch
   maxMisses: 6,         // stop after this many frames without the ball
   minArea: 3,           // smallest blob (pixels) that can be the ball
   maxArea: 2500,        // larger white areas (shirts, sky, lines) are not the ball
@@ -92,25 +93,36 @@ export function createTracker(start, options = {}) {
   let last = { x: start.x, y: start.y };
   let finished = false;
   let previous = null;
+  let launched = false;
+  let waitFrames = 0;
+  let firstDetection = null;
 
   function step(frame, time) {
     if (finished) return { done: true };
     if (previous && frameDifference(frame, previous) <= o.duplicateThreshold) {
       return { found: false, duplicate: true, done: false };
     }
-    const initializing = points.length < 2;
+    const initializing = !launched;
+    if (initializing) waitFrames++;
     const predicted = initializing ? start : { x: last.x + velocity.x * (misses + 1), y: last.y + velocity.y * (misses + 1) };
     const radius = Math.min(o.searchRadius * (initializing ? 2.5 : 1) * Math.pow(o.missGrowth, misses), Math.max(frame.width, frame.height));
     const reference = previous && previous.width === frame.width && previous.height === frame.height ? previous : null;
-    const hit = findBall(frame, predicted, radius, o, reference);
+    // Keep visible still points so summaries can locate the start of launch.
+    let hit = initializing ? findBall(frame, start, o.searchRadius / 2, o) : null;
+    if (!hit) hit = findBall(frame, predicted, radius, o, reference);
     // Video/canvas buffers may be reused by the caller.
     previous = { width: frame.width, height: frame.height, data: new Uint8ClampedArray(frame.data) };
     if (!hit) {
-      misses++;
-      if (misses > o.maxMisses) finished = true;
+      if (launched) {
+        misses++;
+        if (misses > o.maxMisses) finished = true;
+      } else if (waitFrames >= o.maxWaitFrames) finished = true;
       return { found: false, done: finished, predicted };
     }
-    if (points.length) {
+    const still = initializing && Math.hypot(hit.x - start.x, hit.y - start.y) < 3;
+    if (!firstDetection) firstDetection = hit;
+    if (initializing && Math.hypot(hit.x - firstDetection.x, hit.y - firstDetection.y) >= 3) launched = true;
+    if (points.length && !still) {
       const steps = misses + 1;
       const v = { x: (hit.x - last.x) / steps, y: (hit.y - last.y) / steps };
       // Smooth the velocity so one noisy detection does not throw the prediction off.
@@ -119,7 +131,8 @@ export function createTracker(start, options = {}) {
     misses = 0;
     last = { x: hit.x, y: hit.y };
     points.push({ x: hit.x, y: hit.y, time, area: hit.area });
-    return { found: true, done: false, point: points[points.length - 1] };
+    if (!launched && waitFrames >= o.maxWaitFrames) finished = true;
+    return { found: true, done: finished, point: points[points.length - 1] };
   }
 
   return { step, points, get finished() { return finished; } };

@@ -155,6 +155,8 @@ test('duplicates preserve misses and a copied reference when the input buffer is
   const tracker = createTracker(fastFlight[0], { maxMisses: 1 });
   const image = frame({ balls: [fastFlight[0]] });
   assert.equal(tracker.step(image, 0).found, true);
+  image.data.set(frame({ balls: [fastFlight[1]] }).data);
+  assert.equal(tracker.step(image, 0.5).found, true);
   image.data.set(frame().data);
   assert.equal(tracker.step(image, 1).found, false);
   for (let i = 0; i < 12; i++) {
@@ -162,5 +164,44 @@ test('duplicates preserve misses and a copied reference when the input buffer is
   }
   image.data.set(frame({ noise: 8 }).data);
   assert.equal(tracker.step(image, 14).done, true);
-  assert.equal(tracker.points.length, 1);
+  assert.equal(tracker.points.length, 2);
+});
+
+for (const value of [245, 150]) {
+  test(`waits through noisy still frames before tracking a ${value === 245 ? 'white' : 'gray'} ball`, () => {
+    const start = { x: 60, y: 200 };
+    const tracker = createTracker(start);
+    const image = (position, seed) => frame({
+      background: [200, 190, 120], noise: 8, seed,
+      balls: [{ ...position, value }]
+    });
+    for (let i = 0; i < 30; i++) {
+      const result = tracker.step(image(start, i + 1), i / 240);
+      assert.equal(result.done, false, `still frame ${i}`);
+      assert.equal(result.duplicate, undefined);
+      assert.equal(result.found, value === 245);
+      assert.equal(tracker.finished, false);
+    }
+    for (let i = 0; i < 30; i++) {
+      const position = { x: start.x + 8 * (i + 1), y: start.y };
+      const result = tracker.step(image(position, i + 31), (i + 30) / 240);
+      assert.equal(result.found, true, `flight frame ${i}`);
+      assert.equal(result.done, false);
+      assert.ok(Math.hypot(result.point.x - position.x, result.point.y - position.y) < 5, `flight frame ${i}`);
+    }
+    if (value === 245) assert.equal(summarize(tracker.points).launchTime, 29 / 240);
+  });
+}
+
+test('limits waiting by distinct frames even when the still ball is visible', () => {
+  assert.equal(DEFAULT_OPTIONS.maxWaitFrames, 600);
+  for (const balls of [[], [{ x: 60, y: 200 }]]) {
+    const tracker = createTracker({ x: 60, y: 200 }, { maxWaitFrames: 3, maxMisses: 0 });
+    for (let i = 0; i < 3; i++) {
+      const image = frame({ balls, noise: 8, seed: i + 1 });
+      assert.equal(tracker.step(image, i).done, i === 2);
+      if (i < 2) assert.equal(tracker.step(image, i + 0.5).duplicate, true);
+    }
+    assert.equal(tracker.finished, true);
+  }
 });

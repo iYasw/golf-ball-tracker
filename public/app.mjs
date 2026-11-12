@@ -49,7 +49,19 @@ $('sample').addEventListener('click', async () => {
     const meta = await (await fetch('samples/sample.json')).json();
     $('fps').value = String(meta.fps);
   } catch {}
-  loadVideo('samples/sample.mp4', 'サンプル動画（合成）');
+  // Load the sample into memory first: some hosts (e.g. Cloudflare Pages) do not advertise
+  // byte ranges, and browsers then refuse to seek a video streamed from its URL.
+  $('fileInfo').textContent = 'サンプル動画を読み込み中…';
+  try {
+    const response = await fetch('samples/sample.mp4');
+    if (!response.ok) throw new Error('HTTP ' + response.status);
+    if (state.objectUrl) URL.revokeObjectURL(state.objectUrl);
+    state.objectUrl = URL.createObjectURL(await response.blob());
+  } catch (e) {
+    $('fileInfo').textContent = 'サンプル動画を読み込めませんでした\n原因：通信エラー（' + e.message + '）。\n対処：通信環境を確認し、ページを再読み込みしてください。';
+    return;
+  }
+  loadVideo(state.objectUrl, 'サンプル動画（合成）');
 });
 
 // ---- Playback and position ----

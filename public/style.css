@@ -30,3 +30,6 @@ footer{text-align:center}
 html,body,button,input,select,textarea,label,#controls{touch-action:manipulation}
 input,select,textarea,button{font-size:16px}
 .stage canvas{touch-action:none}
+summary{font-size:18px;font-weight:700;cursor:pointer;margin-bottom:16px}
+#liveFps{font-size:12px}
+#liveStage{margin-top:12px}

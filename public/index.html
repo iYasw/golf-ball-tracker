@@ -4,16 +4,27 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
 <meta name="theme-color" content="#0f1712">
-<title>Golf Ball Tracker</title>
+<title>ゴルフボール追跡</title>
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
 <main>
   <header>
-    <h1>Golf Ball Tracker</h1>
+    <h1>ゴルフボール追跡</h1>
     <p class="lead">ゴルフ動画から白いボールの軌跡を追跡します。動画は端末内だけで処理し、どこにも送信しません。</p>
   </header>
 
+  <section class="card">
+    <h2>カメラで解析（リアルタイム）</h2>
+    <p class="note">ゴルファーの後方から撮影し、ボールと体をガイドに合わせてください。</p>
+    <div class="row"><button id="cameraStart">カメラを起動</button><button id="nextShot" class="secondary">次のショット</button></div>
+    <label>打ち方 <select id="hand"><option value="right">右打ち</option><option value="left">左打ち</option></select></label>
+    <div id="liveStage" class="stage" hidden><video id="liveVideo" playsinline muted autoplay></video><canvas id="liveOverlay" aria-label="ボールとゴルファーの位置合わせガイド"></canvas></div>
+    <p id="liveStatus" class="status" role="status" aria-live="polite">ボールを枠に合わせてください</p>
+    <p id="liveFps" class="note">解析：0 コマ/秒</p>
+    <div id="liveResults" hidden><h2>結果（画面上の観測値）</h2><dl class="results" id="liveValues"></dl></div>
+  </section>
+  <details id="recorded" open><summary>録画した動画で解析</summary>
   <section class="card">
     <h2>1. 動画を選ぶ</h2>
     <label class="file">動画を選択<input id="file" type="file" accept="video/*"></label>
@@ -36,10 +47,10 @@
       <p class="note"><span id="time">0.000</span> 秒 / <span id="duration">0.000</span> 秒</p>
       <label class="inline">フレームレート
         <select id="fps">
-          <option value="30">30 fps</option>
-          <option value="60" selected>60 fps</option>
-          <option value="120">120 fps</option>
-          <option value="240">240 fps（スロー撮影）</option>
+          <option value="30">30 コマ/秒</option>
+          <option value="60" selected>60 コマ/秒</option>
+          <option value="120">120 コマ/秒</option>
+          <option value="240">240 コマ/秒（スロー撮影）</option>
         </select>
       </label>
     </div>
@@ -50,6 +61,7 @@
     <p class="note">アドレス時や打たれる直前のボールをタップすると、自動で追跡を開始します。</p>
     <p id="startInfo" class="note" role="status">開始位置：未指定</p>
     <div class="row">
+      <button id="guideTrack" type="button" hidden>枠内のボールで追跡</button>
       <button id="track" type="button" disabled>もう一度追跡</button>
       <button id="stop" type="button" class="secondary" disabled>停止</button>
       <button id="clear" type="button" class="secondary">軌跡を消去</button>
@@ -70,6 +82,7 @@
     <p class="note">これらは映像上の値です（px＝動画の画素、秒＝動画の再生時間）。実際の初速・打ち出し角度・キャリーではありません。カメラの向きや距離で変わります。</p>
   </section>
 
+  </details>
   <footer class="note">v0.2 · 処理はすべてこの端末内で行います</footer>
 </main>
 <script type="module" src="app.mjs"></script>

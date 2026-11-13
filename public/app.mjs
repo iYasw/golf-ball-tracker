@@ -119,9 +119,11 @@ function seek(time) {
 overlay.addEventListener('click', e => {
   if (state.tracking || !video.videoWidth) return;
   const rect = overlay.getBoundingClientRect();
-  state.start = {
-    x: (e.clientX - rect.left) / rect.width * video.videoWidth,
-    y: (e.clientY - rect.top) / rect.height * video.videoHeight,
+  const scale = Math.min(rect.width / video.videoWidth, rect.height / video.videoHeight);
+  const x = (e.clientX - rect.left - (rect.width - video.videoWidth * scale) / 2) / scale;
+  const y = (e.clientY - rect.top - (rect.height - video.videoHeight * scale) / 2) / scale;
+  if (x < 0 || y < 0 || x > video.videoWidth || y > video.videoHeight) return;
+  state.start = { x, y,
     // The frame on screen, by frame number at the chosen frame rate.
     time: Math.floor(video.currentTime * fps() + 1e-6) / fps()
   };
@@ -237,35 +239,86 @@ const liveRead = liveAnalysis.getContext('2d', { willReadFrequently: true });
 const launchSnapshot = document.createElement('canvas');
 let session, stream, generation = 0, previousSnapshot = null, capturedLaunch = false;
 let fpsStart = 0, fpsFrames = 0;
+let recorder, recordTimer, imageBlob, videoBlob, shotDate, imageToken = 0;
+function stopRecording() { clearTimeout(recordTimer); if (recorder?.state === 'recording') recorder.stop(); }
+function startRecording() {
+  stopRecording(); videoBlob = null; live.videoBytes = 0; $('saveVideo').disabled = true;
+  if (!window.MediaRecorder) return;
+  const mimeType = ['video/mp4', 'video/webm;codecs=vp9', 'video/webm'].find(type => MediaRecorder.isTypeSupported(type));
+  try {
+    const chunks = [];
+    const current = new MediaRecorder(stream, mimeType ? { mimeType } : {}); recorder = current;
+    current.ondataavailable = e => { if (e.data.size) chunks.push(e.data); };
+    current.onstop = () => { if (recorder !== current) return; videoBlob = new Blob(chunks, { type: current.mimeType }); live.videoBytes = videoBlob.size; $('saveVideo').disabled = !videoBlob.size; };
+    current.start(200);
+  } catch {}
+}
+function buildImage() {
+  const token = ++imageToken; shotDate = new Date();
+  const canvas = document.createElement('canvas'); canvas.width = liveCanvas.width; canvas.height = liveCanvas.height;
+  const c = canvas.getContext('2d'); c.drawImage(liveCanvas, 0, 0);
+  const size = Math.max(12, Math.round(canvas.width / 38));
+  const lines = [...$('liveValues').children].reduce((rows, el, i, all) => { if (i % 2 === 0) rows.push(el.textContent + '：' + all[i + 1].textContent); return rows; }, []);
+  lines.push(shotDate.toLocaleString('ja-JP') + ' / ' + live.captureFps + ' fps');
+  c.fillStyle = '#102017e8'; c.fillRect(0, 0, canvas.width, size * (lines.length + 1) * 1.5);
+  c.font = size + 'px sans-serif'; c.fillStyle = '#fff'; lines.forEach((line, i) => c.fillText(line, size, size * (i + 1) * 1.5, canvas.width - size * 2));
+  canvas.toBlob(blob => { if (token !== imageToken) return; imageBlob = blob; live.imageBytes = blob?.size || 0; $('saveImage').disabled = !blob; }, 'image/png');
+}
+async function saveShot(blob, extension) {
+  if (!blob) return;
+  const d = shotDate || new Date(), pad = n => String(n).padStart(2, '0');
+  const name = 'golf-shot-' + d.getFullYear() + pad(d.getMonth()+1) + pad(d.getDate()) + '-' + pad(d.getHours()) + pad(d.getMinutes()) + pad(d.getSeconds()) + '.' + extension;
+  const file = new File([blob], name, { type: blob.type });
+  if (navigator.canShare?.({ files: [file] })) { try { await navigator.share({ files: [file] }); } catch {} return; }
+  const link = document.createElement('a'); link.href = URL.createObjectURL(blob); link.download = name; link.click(); setTimeout(() => URL.revokeObjectURL(link.href), 60000);
+}
+$('saveImage').onclick = () => saveShot(imageBlob, 'png');
+$('saveVideo').onclick = () => saveShot(videoBlob, videoBlob?.type.includes('mp4') ? 'mp4' : 'webm');
 const live = { phase: 'align', points: [] };
 window.golfLive = live;
 function resetLive() {
   session = createLiveSession({ guide: createGuide($('hand').value === 'left') });
   Object.assign(live, { phase: 'align', points: [], summary: null });
+  stopRecording(); imageToken++; imageBlob = null; live.imageBytes = 0; $('saveImage').disabled = true;
   previousSnapshot = null; capturedLaunch = false;
   $('liveResults').hidden = true;
 }
 function stopCamera() {
+  stopRecording();
   generation++;
   stream?.getTracks().forEach(track => track.stop());
   stream = null; liveVideo.srcObject = null;
-  $('cameraStart').disabled = false;
+  $('cameraStart').disabled = false; $('cameraStart').hidden = false;
 }
 function cameraError(error) {
   const denied = error.name === 'NotAllowedError' || error.name === 'SecurityError';
   $('liveStatus').textContent = 'カメラを使えません\n原因：' + (denied ? 'カメラの使用が許可されていません。' : error.name === 'NotFoundError' ? 'カメラが見つかりません。' : 'カメラを起動できません。') + '\n対処：' + (denied ? 'ブラウザのカメラ権限を許可し、HTTPSで開いてください。' : 'カメラの接続と他のアプリの使用状況を確認して、再試行してください。');
 }
-$('cameraStart').addEventListener('click', async () => {
+async function startCamera() {
   stopCamera(); resetLive();
   const token = generation;
   $('cameraStart').disabled = true;
   try {
     const acquired = await navigator.mediaDevices.getUserMedia({ audio: false, video: { facingMode: 'environment', width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { ideal: 60 } } });
     if (token !== generation) { acquired.getTracks().forEach(t => t.stop()); return; }
-    stream = acquired; liveVideo.srcObject = stream;
+    stream = acquired;
+    const track = stream.getVideoTracks()[0];
+    const maximum = track.getCapabilities?.().frameRate?.max;
+    let maximumApplied = false;
+    if (maximum) {
+      const rates = [...new Set([maximum, ...[120, 60, 30, 15].filter(rate => rate < maximum)])];
+      for (const rate of rates) {
+        try { await track.applyConstraints({ frameRate: { exact: rate }, width: { ideal: 1280 }, height: { ideal: 720 } }); maximumApplied = rate === maximum; break; }
+        catch { try { await track.applyConstraints({ frameRate: { exact: rate } }); maximumApplied = rate === maximum; break; } catch {} }
+      }
+    }
+    if (token !== generation) return;
+    live.captureFps = track.getSettings().frameRate;
+    $('captureFps').textContent = '撮影 ' + (live.captureFps ? fmt(live.captureFps, 0) : '不明') + ' fps' + (maximumApplied && live.captureFps >= maximum - 0.5 ? '（この端末で使える最大）' : '');
+    liveVideo.srcObject = stream;
     await liveVideo.play();
     if (token !== generation) return;
-    $('liveStage').hidden = false;
+    $('liveStage').hidden = false; $('cameraStart').hidden = true;
     liveCanvas.width = liveVideo.videoWidth; liveCanvas.height = liveVideo.videoHeight;
     const scale = Math.min(1, 960 / liveCanvas.width);
     liveAnalysis.width = Math.round(liveCanvas.width * scale); liveAnalysis.height = Math.round(liveCanvas.height * scale);
@@ -294,12 +347,19 @@ $('cameraStart').addEventListener('click', async () => {
           if (moving) capturedLaunch = true;
         }
       }
+      const oldPhase = live.phase;
+      if (result.phase === 'ready' && oldPhase !== 'ready') startRecording();
+      if (result.phase === 'align' && oldPhase !== 'align') stopRecording();
       const points = result.points.map(p => ({ ...p, x: p.x / scale, y: p.y / scale }));
       Object.assign(live, result, { points, summary: result.phase === 'result' ? summarize(points) : null });
       liveCtx.clearRect(0, 0, liveCanvas.width, liveCanvas.height);
       if (live.phase === 'result' && previousSnapshot) liveCtx.drawImage(launchSnapshot, 0, 0);
       else drawGuide(liveCtx, liveCanvas.width, liveCanvas.height, createGuide($('hand').value === 'left'));
       drawPath(liveCtx, points, liveCanvas.width);
+      if (points.length) {
+        liveCtx.strokeStyle = '#5fd27a'; liveCtx.lineWidth = Math.max(3, liveCanvas.width / 240);
+        liveCtx.beginPath(); liveCtx.arc(points[0].x, points[0].y, Math.max(8, liveCanvas.width / 80), 0, Math.PI * 2); liveCtx.stroke();
+      }
       $('liveStatus').textContent = live.message;
       $('liveResults').hidden = live.phase !== 'result';
       if (live.summary) {
@@ -307,18 +367,28 @@ $('cameraStart').addEventListener('click', async () => {
         const rows = [['追跡できたフレーム', s.points + ' 点'], ['打ち出し直後の画面速度', fmt(s.launchSpeedPxPerSec, 0) + ' px/秒'], ['画面上の打ち出し角度', fmt(s.launchAngleDeg) + '°（' + (s.direction === 'right' ? '右' : '左') + '方向）'], ['画面上の移動距離', fmt(s.pathLengthPx, 0) + ' px'], ['打ち出し後の追跡時間', fmt(s.durationSec, 3) + ' 秒']];
         $('liveValues').replaceChildren(...rows.flatMap(([label, value]) => { const dt = document.createElement('dt'), dd = document.createElement('dd'); dt.textContent = label; dd.textContent = value; return [dt, dd]; }));
       }
+      if (live.phase === 'result' && oldPhase !== 'result') { buildImage(); recordTimer = setTimeout(stopRecording, 1500); }
       fpsFrames++;
       if (now - fpsStart >= 1000) { $('liveFps').textContent = '解析：' + (fpsFrames * 1000 / (now - fpsStart)).toFixed(1) + ' コマ/秒'; fpsFrames = 0; fpsStart = now; }
       schedule();
     }
     schedule();
-  } catch (error) { stopCamera(); cameraError(error); }
-});
+  } catch (error) { if (token === generation) { stopCamera(); cameraError(error); } }
+}
+$('cameraStart').addEventListener('click', startCamera);
 $('nextShot').addEventListener('click', resetLive);
 $('hand').addEventListener('change', () => { resetLive(); draw(); });
 document.addEventListener('visibilitychange', () => { if (document.hidden) stopCamera(); });
 window.addEventListener('pagehide', stopCamera);
 resetLive();
+function selectTab(camera) {
+  $('cameraPanel').hidden = !camera; $('recorded').hidden = camera;
+  $('cameraTab').setAttribute('aria-selected', String(camera)); $('videoTab').setAttribute('aria-selected', String(!camera));
+  if (!camera) { stopCamera(); } else if (!stream) startCamera();
+}
+$('cameraTab').onclick = () => selectTab(true);
+$('videoTab').onclick = () => selectTab(false);
+startCamera();
 
 video.addEventListener('play', () => {
   function update() {

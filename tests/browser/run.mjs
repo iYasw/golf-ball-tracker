@@ -45,6 +45,7 @@ try {
   const errors = [];
   page.on('pageerror', e => errors.push(e.message));
   await page.goto(url);
+  await page.click('#videoTab');
   await page.click('#sample');
   await page.waitForFunction(() => document.getElementById('video').readyState >= 2 && !document.getElementById('stage').hidden);
   check(await page.textContent('#fileInfo').then(t => t.includes('1280×720')), 'sample video loads (1280×720)');
@@ -66,7 +67,7 @@ try {
 
   // Tap the ball at video pixel (100, 620).
   const box = await page.locator('#overlay').boundingBox();
-  await page.mouse.click(box.x + 100 / 1280 * box.width, box.y + 620 / 720 * box.height);
+  await page.mouse.click(box.x + 100 / 1280 * box.width, box.y + (box.height - box.width * 720 / 1280) / 2 + 620 / 1280 * box.width);
   check(await page.evaluate(() => !!window.golfTracker.start && window.golfTracker.tracking), 'tap sets start position and starts tracking automatically');
 
   await page.waitForFunction(() => !window.golfTracker.tracking && window.golfTracker.points.length > 0, null, { timeout: 60000 });
@@ -81,11 +82,11 @@ try {
   check(await page.isVisible('#resultCard') && (await page.textContent('#rSpeed')).includes('px/再生秒'), 'results shown in px per playback second');
   check(await page.evaluate(() => { const c = document.getElementById('overlay'); const d = c.getContext('2d').getImageData(0, 0, c.width, c.height).data; let n = 0; for (let i = 0; i < d.length; i += 4) if (d[i] > 200 && d[i + 1] > 180 && d[i + 2] < 120 && d[i + 3] > 0) n++; return n > 500; }), 'yellow path drawn on the video');
   check(errors.length === 0, 'no page errors' + (errors.length ? ': ' + errors.join('; ') : ''));
-  const camera = await browser.newPage();
+  const camera = await browser.newPage({ viewport: { width: 393, height: 852 } });
   const cameraErrors = [];
   camera.on('pageerror', e => cameraErrors.push(e.message));
   await camera.goto(url);
-  await camera.click('#cameraStart');
+  check(await camera.evaluate(() => document.scrollingElement.scrollHeight <= innerHeight + 1), 'camera tab fits viewport without scrolling');
   await camera.waitForFunction(() => window.golfLive.phase === 'result', null, { timeout: 20000 });
   check(await camera.evaluate(() => window.golfLive.points.length > 10 && window.golfLive.summary.moved), 'fake camera reaches result with a measured flight');
   check(await camera.evaluate(() => {
@@ -100,6 +101,18 @@ try {
     }
     return pixels > 500 && widest >= 6;
   }), 'live snapshot has a thick yellow path');
+  await camera.waitForFunction(() => window.golfLive.videoBytes > 0 && window.golfLive.imageBytes > 0, null, { timeout: 10000 });
+  check(await camera.textContent('#captureFps').then(t => /撮影 .*fps/.test(t)), 'camera frame rate shown');
+  const download = camera.waitForEvent('download');
+  await camera.click('#saveImage');
+  check((await download).suggestedFilename().endsWith('.png'), 'non-empty PNG image can be saved');
+  check(await camera.evaluate(() => window.golfLive.videoBytes > 0), 'shot recording exists');
+  for (const viewport of [{ width: 393, height: 852 }, { width: 430, height: 932 }]) {
+    await page.setViewportSize(viewport);
+    check(await page.evaluate(() => document.scrollingElement.scrollHeight <= innerHeight + 1), 'video tab fits ' + viewport.width);
+    await camera.setViewportSize(viewport);
+    check(await camera.evaluate(() => document.scrollingElement.scrollHeight <= innerHeight + 1), 'camera tab fits ' + viewport.width);
+  }
   check(cameraErrors.length === 0, 'camera has no page errors');
   await camera.evaluate(() => document.dispatchEvent(new Event('pagehide')));
   await camera.close();
@@ -107,6 +120,7 @@ try {
   const safariLike = await browser.newPage({ viewport: { width: 393, height: 852 } });
   await safariLike.addInitScript(() => document.addEventListener('loadeddata', e => e.stopImmediatePropagation(), true));
   await safariLike.goto(url);
+  await safariLike.click('#videoTab');
   await safariLike.setInputFiles('#file', path.join(root, 'samples', 'sample.mp4'));
   const picked = await safariLike.waitForFunction(() => /1280×720/.test(document.getElementById('fileInfo').textContent), null, { timeout: 15000 }).then(() => true, () => false);
   check(picked && await safariLike.isVisible('#stage'), 'a picked file loads even when the browser never fires loadeddata');

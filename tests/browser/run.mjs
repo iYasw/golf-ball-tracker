@@ -81,6 +81,14 @@ try {
   check(await page.isVisible('#resultCard') && (await page.textContent('#rSpeed')).includes('px/再生秒'), 'results shown in px per playback second');
   check(await page.evaluate(() => { const c = document.getElementById('overlay'); const d = c.getContext('2d').getImageData(0, 0, c.width, c.height).data; let n = 0; for (let i = 0; i < d.length; i += 4) if (d[i] > 200 && d[i + 1] > 180 && d[i + 2] < 120 && d[i + 3] > 0) n++; return n > 500; }), 'yellow path drawn on the video');
   check(errors.length === 0, 'no page errors' + (errors.length ? ': ' + errors.join('; ') : ''));
+  // iPhone Safari may never fire "loadeddata" for a picked file until playback or a seek.
+  const safariLike = await browser.newPage({ viewport: { width: 393, height: 852 } });
+  await safariLike.addInitScript(() => document.addEventListener('loadeddata', e => e.stopImmediatePropagation(), true));
+  await safariLike.goto(url);
+  await safariLike.setInputFiles('#file', path.join(root, 'samples', 'sample.mp4'));
+  const picked = await safariLike.waitForFunction(() => /1280×720/.test(document.getElementById('fileInfo').textContent), null, { timeout: 15000 }).then(() => true, () => false);
+  check(picked && await safariLike.isVisible('#stage'), 'a picked file loads even when the browser never fires loadeddata');
+  await safariLike.close();
   if (process.env.SCREENSHOT) await page.screenshot({ path: process.env.SCREENSHOT, fullPage: true });
 } finally {
   await browser.close();

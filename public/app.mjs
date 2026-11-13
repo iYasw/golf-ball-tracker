@@ -14,19 +14,31 @@ const fmt = (n, d = 1) => (n == null || !Number.isFinite(n) ? '-' : n.toFixed(d)
 
 function setStatus(text) { $('status').textContent = text; }
 
+// Resolves when `event` fires on the video, or rejects on error or after `ms`.
+function waitFor(event, ms) {
+  return new Promise((resolve, reject) => {
+    const done = ok => { clearTimeout(timer); video.removeEventListener(event, onEvent); video.removeEventListener('error', onError); ok ? resolve() : reject(new Error(event)); };
+    const onEvent = () => done(true), onError = () => done(false);
+    const timer = setTimeout(() => done(false), ms);
+    video.addEventListener(event, onEvent, { once: true });
+    video.addEventListener('error', onError, { once: true });
+  });
+}
+
 async function loadVideo(src, name) {
   resetTrack();
   if (state.objectUrl && state.objectUrl !== src) URL.revokeObjectURL(state.objectUrl);
   state.name = name;
-  video.src = src;
   $('fileInfo').textContent = '読み込み中…';
+  // iPhone Safari may not load picture data (no "loadeddata") until playback or a seek,
+  // so wait only for metadata, then seek to the first frame to make it load.
+  const metadata = waitFor('loadedmetadata', 20000);
+  video.src = src;
+  video.load();
   try {
-    await new Promise((resolve, reject) => {
-      video.onloadeddata = resolve;
-      video.onerror = () => reject(new Error('この動画を読み込めませんでした。'));
-    });
+    await metadata;
   } catch (e) {
-    $('fileInfo').textContent = '読み込めませんでした\n原因：この端末のブラウザが対応していない形式か、ファイルが壊れています。\n対処：iPhoneの「カメラ」で撮影したMP4/MOVでお試しください。';
+    $('fileInfo').textContent = '読み込めませんでした\n原因：この端末のブラウザが対応していない形式か、ファイルが壊れているか、読み込みに時間がかかりすぎています。\n対処：iPhoneの「カメラ」で撮影したMP4/MOVでお試しください。長い動画は、写真アプリでスイングの部分だけに短くすると読み込みやすくなります。';
     return;
   }
   overlay.width = video.videoWidth;
@@ -34,6 +46,11 @@ async function loadVideo(src, name) {
   $('stage').hidden = false; $('controls').hidden = false; $('trackCard').hidden = false;
   $('fileInfo').textContent = name + ' · ' + video.videoWidth + '×' + video.videoHeight + ' · ' + video.duration.toFixed(2) + ' 秒';
   $('duration').textContent = video.duration.toFixed(3);
+  if (video.readyState < 2) {
+    const firstFrame = waitFor('seeked', 5000).catch(() => {});
+    video.currentTime = Math.min(0.001, video.duration || 0);
+    await firstFrame;
+  }
   updateTime();
   draw();
 }
@@ -41,6 +58,7 @@ async function loadVideo(src, name) {
 $('file').addEventListener('change', e => {
   const file = e.target.files?.[0];
   if (!file) return;
+  if (state.objectUrl) URL.revokeObjectURL(state.objectUrl);
   state.objectUrl = URL.createObjectURL(file);
   loadVideo(state.objectUrl, file.name);
 });

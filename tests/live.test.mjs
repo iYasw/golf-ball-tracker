@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { createLiveSession, createGuide } from '../public/live.mjs';
+import { createLiveSession, createGuide, guideBall } from '../public/live.mjs';
 function frame({ width = 640, height = 360, balls = [], rects = [], noise = 0, seed = 1, background = [47, 107, 52], darkFrom = Infinity } = {}) {
   const data = new Uint8ClampedArray(width * height * 4);
   let s = seed;
@@ -45,7 +45,7 @@ test('live align, ready, tracking, result and next shot', () => {
 });
 test('picked-up ball returns to align without launch', () => {
   const s = createLiveSession(); ready(s);
-  s.step(frame(), 1); assert.equal(s.step(frame(), 1.3).phase, 'align');
+  s.step(frame(), 1); assert.equal(s.step(frame(), 2.6).phase, 'align');
 });
 test('moving club near resting ball never launches', () => {
   const s = createLiveSession(); ready(s);
@@ -56,4 +56,55 @@ test('left guide mirrors the ball and detects it', () => {
   const s = createLiveSession({ guide: createGuide(true) }); let r;
   for (let i = 0; i < 40; i++) r = s.step(frame({ balls: [{ x: 448, y: ball.y }] }), i / 60);
   assert.equal(r.phase, 'ready');
+});
+
+for (const gain of [1, 0.85, 0.75]) {
+  test(`guide detects a shaded ball and launches at exposure ${gain}`, () => {
+    const image = balls => {
+      const f = frame({ balls: balls.map(p => ({ ...p, value: 195 })) });
+      for (let i = 0; i < f.data.length; i += 4) {
+        for (let c = 0; c < 3; c++) f.data[i + c] *= gain;
+      }
+      return f;
+    };
+    const hit = guideBall(image([ball]));
+    assert.ok(hit && Math.hypot(hit.x - ball.x, hit.y - ball.y) < 1);
+    const s = createLiveSession();
+    let r;
+    for (let i = 0; i <= 40; i++) r = s.step(image([ball]), i / 60);
+    assert.equal(r.phase, 'ready');
+    const anchor = r.ballStart;
+    for (const time of [1, 1.3, 1.7]) {
+      r = s.step(image([]), time);
+      assert.equal(r.phase, 'ready');
+      assert.deepEqual(r.ballStart, anchor);
+    }
+    r = s.step(image([ball]), 1.8);
+    assert.equal(r.phase, 'ready');
+    for (let i = 1; i <= 8; i++) {
+      r = s.step(image([{ x: ball.x + i * 8, y: ball.y - i * 9 }]), 2 + i / 60);
+    }
+    assert.equal(r.phase, 'tracking');
+    assert.ok(r.points.some(p => p.y < ball.y - 60));
+  });
+}
+
+test('guide rejects tiny specks and oversized white areas at bright and dark exposure', () => {
+  for (const [background, value] of [[160, 245], [60, 110]]) {
+    const hit = guideBall(frame({
+      background: [background, background, background],
+      balls: [{ ...ball, x: ball.x + 8, value }, { ...ball, r: 1, value: 255 }],
+      rects: [{ x: 170, y: 274, w: 45, h: 3 }]
+    }));
+    assert.ok(hit && Math.hypot(hit.x - ball.x - 8, hit.y - ball.y) < 1);
+  }
+});
+
+test('next shot resets ready immediately', () => {
+  const s = createLiveSession();
+  ready(s);
+  s.reset();
+  const r = s.step(frame({ balls: [ball] }), 1);
+  assert.equal(r.phase, 'align');
+  assert.deepEqual(r.points, []);
 });

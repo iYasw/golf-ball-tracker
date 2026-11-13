@@ -1,11 +1,11 @@
 // Pure live state and normalized alignment geometry.
-import { createTracker, findBall, summarize, DEFAULT_OPTIONS } from './tracker.mjs';
+import { createTracker, findStillBall, summarize, DEFAULT_OPTIONS } from './tracker.mjs';
 export function createGuide(lefty = false) {
   return { x: lefty ? 0.70 : 0.30, y: 0.82, radius: 0.03, lefty };
 }
 export function guideBall(frame, guide = createGuide()) {
   const center = { x: guide.x * frame.width, y: guide.y * frame.height };
-  return findBall(frame, center, guide.radius * frame.width * 1.5, DEFAULT_OPTIONS);
+  return findStillBall(frame, center, guide.radius * frame.width * 1.5, DEFAULT_OPTIONS);
 }
 export function createLiveSession({ guide = createGuide(), options = {} } = {}) {
   let phase, anchor, since, tracker, launchTime, resultTime, missingSince;
@@ -35,7 +35,8 @@ export function createLiveSession({ guide = createGuide(), options = {} } = {}) 
         const present = ball && Math.hypot(ball.x - anchor.x, ball.y - anchor.y) < Math.max(3, Math.sqrt(anchor.area) * 0.5);
         if (present) missingSince = null;
         else if (missingSince == null) missingSince = time;
-        else if (time - missingSince >= 0.25) reset();
+        // Give the tracker time to confirm launch through impact occlusion.
+        else if (time - missingSince > 1.5) reset();
       }
     }
     return output();

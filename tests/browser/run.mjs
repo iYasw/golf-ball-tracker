@@ -37,7 +37,7 @@ const truth = t => {
   return { x: 100 + 600 * s, y: 620 - (900 * s - 600 * s * s) };
 };
 
-const browser = await chromium.launch(process.env.PW_CHANNEL ? { channel: process.env.PW_CHANNEL } : {});
+const browser = await chromium.launch({ ...(process.env.PW_CHANNEL ? { channel: process.env.PW_CHANNEL } : {}), args: ['--use-fake-ui-for-media-stream', '--use-fake-device-for-media-stream', '--use-file-for-fake-video-capture=' + path.resolve(root, '../tests/fixtures/fake-camera.mjpeg')] });
 let failed = false;
 const check = (ok, label) => { console.log((ok ? 'ok    ' : 'FAIL  ') + label); if (!ok) failed = true; };
 try {
@@ -81,6 +81,28 @@ try {
   check(await page.isVisible('#resultCard') && (await page.textContent('#rSpeed')).includes('px/再生秒'), 'results shown in px per playback second');
   check(await page.evaluate(() => { const c = document.getElementById('overlay'); const d = c.getContext('2d').getImageData(0, 0, c.width, c.height).data; let n = 0; for (let i = 0; i < d.length; i += 4) if (d[i] > 200 && d[i + 1] > 180 && d[i + 2] < 120 && d[i + 3] > 0) n++; return n > 500; }), 'yellow path drawn on the video');
   check(errors.length === 0, 'no page errors' + (errors.length ? ': ' + errors.join('; ') : ''));
+  const camera = await browser.newPage();
+  const cameraErrors = [];
+  camera.on('pageerror', e => cameraErrors.push(e.message));
+  await camera.goto(url);
+  await camera.click('#cameraStart');
+  await camera.waitForFunction(() => window.golfLive.phase === 'result', null, { timeout: 20000 });
+  check(await camera.evaluate(() => window.golfLive.points.length > 10 && window.golfLive.summary.moved), 'fake camera reaches result with a measured flight');
+  check(await camera.evaluate(() => {
+    const c = document.getElementById('liveOverlay'), d = c.getContext('2d').getImageData(0, 0, c.width, c.height).data;
+    let pixels = 0, widest = 0;
+    for (let y = 0; y < c.height; y++) {
+      let run = 0;
+      for (let x = 0; x < c.width; x++) {
+        const i = (y * c.width + x) * 4;
+        if (d[i] > 220 && d[i + 1] > 180 && d[i + 2] < 120) { pixels++; run++; widest = Math.max(widest, run); } else run = 0;
+      }
+    }
+    return pixels > 500 && widest >= 6;
+  }), 'live snapshot has a thick yellow path');
+  check(cameraErrors.length === 0, 'camera has no page errors');
+  await camera.evaluate(() => document.dispatchEvent(new Event('pagehide')));
+  await camera.close();
   // iPhone Safari may never fire "loadeddata" for a picked file until playback or a seek.
   const safariLike = await browser.newPage({ viewport: { width: 393, height: 852 } });
   await safariLike.addInitScript(() => document.addEventListener('loadeddata', e => e.stopImmediatePropagation(), true));

@@ -22,6 +22,27 @@ export function isBallPixel(r, g, b, o = DEFAULT_OPTIONS) {
   return max >= o.minBrightness && max - min <= o.maxSaturation;
 }
 
+// Local contrast keeps shaded resting balls visible as exposure changes.
+export function findStillBall(frame, center, radius, o = DEFAULT_OPTIONS, contrast = 20) {
+  const histogram = new Uint32Array(256);
+  let count = 0;
+  for (let y = Math.max(0, Math.floor(center.y - radius)); y <= Math.min(frame.height - 1, Math.ceil(center.y + radius)); y++) {
+    for (let x = Math.max(0, Math.floor(center.x - radius)); x <= Math.min(frame.width - 1, Math.ceil(center.x + radius)); x++) {
+      const i = (y * frame.width + x) * 4;
+      histogram[Math.round((frame.data[i] + frame.data[i + 1] + frame.data[i + 2]) / 3)]++;
+      count++;
+    }
+  }
+  if (!count) return null;
+  let median = 0, total = 0;
+  while (median < 255 && (total += histogram[median]) < count / 2) median++;
+  return findBall(frame, center, radius, {
+    ...o, minBrightness: median + contrast, maxSaturation: Math.min(o.maxSaturation, 30),
+    minArea: Math.max(o.minArea, Math.PI * radius * radius * 0.008),
+    maxArea: Math.min(o.maxArea, Math.PI * radius * radius * 0.35)
+  }, null, { resting: true });
+}
+
 // Scores compact candidate blobs near the prediction, using motion when available.
 // frame: { width, height, data: Uint8ClampedArray RGBA }
 export function findBall(frame, predicted, radius, o = DEFAULT_OPTIONS, previous = null, motion = null) {
@@ -73,9 +94,11 @@ export function findBall(frame, predicted, radius, o = DEFAULT_OPTIONS, previous
     if (compactness < (motion?.launching ? 0.5 : 0.3)) continue;
     if (motion?.launching && Math.max(maxX - minX + 1, maxY - minY + 1) > Math.min(maxX - minX + 1, maxY - minY + 1) * 4) continue;
     if (motion?.brightness && light / area < Math.max(110, motion.brightness * 0.55)) continue;
-    if (motion?.area && (area > motion.area * 3 || (motion.launching && area < motion.area * 0.1))) continue;
+    // Reject impact fragments, then allow the flying ball to shrink.
+    if (motion?.area && (area > motion.area * 3 || area < motion.area * (motion.launching || motion.earlyFlight ? 0.1 : 0.03))) continue;
     // Tiny fragments are less reliable than a coherent ball silhouette.
-    let score = d + (motion?.area ? 25 * (1 - Math.min(1, area / (motion.area * 0.15))) : 0);
+    let score = d + (motion?.area ? (motion.launching ? o.searchRadius * 4 : 25)
+      * (1 - Math.min(1, area / (motion.area * (motion.launching ? 0.6 : 0.15)))) : 0);
     if (motion?.length > 3) {
       const dx = cx - motion.last.x, dy = cy - motion.last.y;
       const travel = Math.hypot(dx, dy);
@@ -84,7 +107,7 @@ export function findBall(frame, predicted, radius, o = DEFAULT_OPTIONS, previous
       if (along < travel * 0.5 || across > Math.max(o.searchRadius / 2, motion.length * 0.4)) continue;
       score += (travel - along) * 2;
     }
-    score += (1 - compactness) * 20 + Math.max(0, 180 - light / area) * 0.5;
+    score += (1 - compactness) * 20 + (motion?.resting ? 0 : Math.max(0, 180 - light / area) * 0.5);
     if (!best || score < best.score) best = { x: cx, y: cy, area, brightness: light / area, score };
   }
   return best && { x: best.x, y: best.y, area: best.area, brightness: best.brightness };
@@ -122,6 +145,7 @@ export function createTracker(start, options = {}) {
   let absentFrames = 0;
   let lastStillCount = 0;
   let tentative = false;
+  let flightDetections = 0;
 
   function step(frame, time) {
     if (finished) return { done: true };
@@ -131,8 +155,8 @@ export function createTracker(start, options = {}) {
     // Check the original silhouette before considering nearby motion.
     let stillHit = null;
     if (tee || !following) {
-      const stillOptions = tee ? { ...o, minBrightness: Math.min(o.minBrightness, 130), maxSaturation: Math.min(o.maxSaturation, 30) } : { ...o, minBrightness: Math.min(o.minBrightness, 160), maxSaturation: Math.min(o.maxSaturation, 30) };
-      const candidate = findBall(frame, tee ?? start, o.searchRadius / 2, stillOptions);
+      // Include the shaded silhouette once its position and size are known.
+      const candidate = findStillBall(frame, tee ?? start, o.searchRadius / 2, o, tee ? -15 : 20);
       if (candidate && (!tee || (Math.hypot(candidate.x - tee.x, candidate.y - tee.y) < Math.max(3, Math.sqrt(tee.area) * 0.45)
         && candidate.area > tee.area * 0.4 && candidate.area < tee.area * 3
         && candidate.brightness >= tee.brightness * 0.7))) stillHit = candidate;
@@ -146,6 +170,7 @@ export function createTracker(start, options = {}) {
         following = false;
         launched = false;
         tentative = false;
+        flightDetections = 0;
       }
       absentFrames = 0;
       if (!tee) tee = { ...stillHit };
@@ -158,7 +183,7 @@ export function createTracker(start, options = {}) {
     const radius = Math.min(baseRadius * Math.pow(o.missGrowth, misses), Math.max(frame.width, frame.height));
     const reference = previous && previous.width === frame.width && previous.height === frame.height ? previous : null;
     // Early flight points remain provisional while the club could be hiding the ball.
-    const motion = { launching: initializing, last, v: velocity, length: Math.hypot(velocity.x, velocity.y), area: ballArea, brightness: initializing ? tee?.brightness : null };
+    const motion = { launching: initializing, earlyFlight: flightDetections < 2, last, v: velocity, length: Math.hypot(velocity.x, velocity.y), area: ballArea, brightness: initializing ? tee?.brightness : null };
     let hit = initializing && stillHit ? stillHit : reference ? findBall(frame, predicted, radius, o, reference, motion) : null;
     if (tee && hit && hit !== stillHit && Math.hypot(hit.x - tee.x, hit.y - tee.y) < Math.max(3, Math.sqrt(tee.area) * 0.5)) hit = null;
     // Video/canvas buffers may be reused by the caller.
@@ -186,6 +211,7 @@ export function createTracker(start, options = {}) {
     misses = 0;
     last = { x: hit.x, y: hit.y };
     points.push({ x: hit.x, y: hit.y, time, area: hit.area });
+    if (!still) flightDetections++;
     if (still) lastStillCount = points.length;
     if (!following && waitFrames >= o.maxWaitFrames) finished = true;
     return { found: true, done: finished, point: points[points.length - 1] };

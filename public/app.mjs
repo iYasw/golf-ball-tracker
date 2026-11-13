@@ -1,5 +1,7 @@
 // Golf Ball Tracker: screen logic. Video never leaves the device.
 import { createTracker, summarize } from './tracker.mjs';
+import { createGuide, guideBall, createLiveSession } from './live.mjs';
+import { drawGuide, drawPath } from './drawing.mjs';
 
 const $ = id => document.getElementById(id);
 const video = $('video'), overlay = $('overlay'), ctx = overlay.getContext('2d');
@@ -208,16 +210,120 @@ function draw() {
   if (!overlay.width) return;
   ctx.clearRect(0, 0, overlay.width, overlay.height);
   const unit = Math.max(2, overlay.width / 400);
-  if (state.points.length > 1) {
-    ctx.strokeStyle = '#ffd84d'; ctx.lineWidth = unit; ctx.lineJoin = 'round'; ctx.lineCap = 'round';
-    ctx.beginPath();
-    state.points.forEach((p, i) => (i ? ctx.lineTo(p.x, p.y) : ctx.moveTo(p.x, p.y)));
-    ctx.stroke();
+  drawGuide(ctx, overlay.width, overlay.height, createGuide($('hand').value === 'left'));
+  drawPath(ctx, state.points, overlay.width);
+  if (!state.tracking && video.readyState >= 2) {
+    const { frame, scale } = grabFrame();
+    const ball = guideBall(frame, createGuide($('hand').value === 'left'));
+    state.guideStart = ball ? { x: ball.x / scale, y: ball.y / scale } : null;
+    $('guideTrack').hidden = !ball;
   }
-  ctx.fillStyle = '#ffd84d';
-  for (const p of state.points) { ctx.beginPath(); ctx.arc(p.x, p.y, unit * 0.9, 0, Math.PI * 2); ctx.fill(); }
   if (state.start) {
     ctx.strokeStyle = '#5fd27a'; ctx.lineWidth = unit * 0.8;
     ctx.beginPath(); ctx.arc(state.start.x, state.start.y, unit * 5, 0, Math.PI * 2); ctx.stroke();
   }
 }
+
+$('guideTrack').addEventListener('click', () => {
+  if (!state.guideStart || state.tracking) return;
+  state.start = { ...state.guideStart, time: Math.floor(video.currentTime * fps() + 1e-6) / fps() };
+  startTracking();
+});
+
+const liveVideo = $('liveVideo'), liveCanvas = $('liveOverlay');
+const liveCtx = liveCanvas.getContext('2d');
+const liveAnalysis = document.createElement('canvas');
+const liveRead = liveAnalysis.getContext('2d', { willReadFrequently: true });
+const launchSnapshot = document.createElement('canvas');
+let session, stream, generation = 0, previousSnapshot = null, capturedLaunch = false;
+let fpsStart = 0, fpsFrames = 0;
+const live = { phase: 'align', points: [] };
+window.golfLive = live;
+function resetLive() {
+  session = createLiveSession({ guide: createGuide($('hand').value === 'left') });
+  Object.assign(live, { phase: 'align', points: [], summary: null });
+  previousSnapshot = null; capturedLaunch = false;
+  $('liveResults').hidden = true;
+}
+function stopCamera() {
+  generation++;
+  stream?.getTracks().forEach(track => track.stop());
+  stream = null; liveVideo.srcObject = null;
+  $('cameraStart').disabled = false;
+}
+function cameraError(error) {
+  const denied = error.name === 'NotAllowedError' || error.name === 'SecurityError';
+  $('liveStatus').textContent = 'カメラを使えません\n原因：' + (denied ? 'カメラの使用が許可されていません。' : error.name === 'NotFoundError' ? 'カメラが見つかりません。' : 'カメラを起動できません。') + '\n対処：' + (denied ? 'ブラウザのカメラ権限を許可し、HTTPSで開いてください。' : 'カメラの接続と他のアプリの使用状況を確認して、再試行してください。');
+}
+$('cameraStart').addEventListener('click', async () => {
+  stopCamera(); resetLive();
+  const token = generation;
+  $('cameraStart').disabled = true;
+  try {
+    const acquired = await navigator.mediaDevices.getUserMedia({ audio: false, video: { facingMode: 'environment', width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { ideal: 60 } } });
+    if (token !== generation) { acquired.getTracks().forEach(t => t.stop()); return; }
+    stream = acquired; liveVideo.srcObject = stream;
+    await liveVideo.play();
+    if (token !== generation) return;
+    $('liveStage').hidden = false;
+    liveCanvas.width = liveVideo.videoWidth; liveCanvas.height = liveVideo.videoHeight;
+    const scale = Math.min(1, 960 / liveCanvas.width);
+    liveAnalysis.width = Math.round(liveCanvas.width * scale); liveAnalysis.height = Math.round(liveCanvas.height * scale);
+    launchSnapshot.width = liveCanvas.width; launchSnapshot.height = liveCanvas.height;
+    fpsStart = performance.now(); fpsFrames = 0;
+    let lastTime = -1;
+    function schedule() {
+      if (token !== generation) return;
+      if (liveVideo.requestVideoFrameCallback) liveVideo.requestVideoFrameCallback((now, meta) => tick(now, meta.mediaTime));
+      else requestAnimationFrame(now => tick(now, liveVideo.currentTime));
+    }
+    function tick(now, time) {
+      if (token !== generation) return;
+      if (time === lastTime || liveVideo.readyState < 2) { schedule(); return; }
+      lastTime = time;
+      liveRead.drawImage(liveVideo, 0, 0, liveAnalysis.width, liveAnalysis.height);
+      const result = session.step(liveRead.getImageData(0, 0, liveAnalysis.width, liveAnalysis.height), time);
+      if (live.phase === 'result' && result.phase !== 'result') { capturedLaunch = false; previousSnapshot = null; }
+      // Capture the first moving frame, before launch confirmation.
+      if (result.phase === 'ready' && result.ballStart) {
+        const p = result.points.at(-1);
+        const moving = p && Math.hypot(p.x - result.ballStart.x, p.y - result.ballStart.y) >= 3;
+        if (p && !capturedLaunch) {
+          launchSnapshot.getContext('2d').drawImage(liveVideo, 0, 0, launchSnapshot.width, launchSnapshot.height);
+          previousSnapshot = true;
+          if (moving) capturedLaunch = true;
+        }
+      }
+      const points = result.points.map(p => ({ ...p, x: p.x / scale, y: p.y / scale }));
+      Object.assign(live, result, { points, summary: result.phase === 'result' ? summarize(points) : null });
+      liveCtx.clearRect(0, 0, liveCanvas.width, liveCanvas.height);
+      if (live.phase === 'result' && previousSnapshot) liveCtx.drawImage(launchSnapshot, 0, 0);
+      else drawGuide(liveCtx, liveCanvas.width, liveCanvas.height, createGuide($('hand').value === 'left'));
+      drawPath(liveCtx, points, liveCanvas.width);
+      $('liveStatus').textContent = live.message;
+      $('liveResults').hidden = live.phase !== 'result';
+      if (live.summary) {
+        const s = live.summary;
+        const rows = [['追跡できたフレーム', s.points + ' 点'], ['打ち出し直後の画面速度', fmt(s.launchSpeedPxPerSec, 0) + ' px/秒'], ['画面上の打ち出し角度', fmt(s.launchAngleDeg) + '°（' + (s.direction === 'right' ? '右' : '左') + '方向）'], ['画面上の移動距離', fmt(s.pathLengthPx, 0) + ' px'], ['打ち出し後の追跡時間', fmt(s.durationSec, 3) + ' 秒']];
+        $('liveValues').replaceChildren(...rows.flatMap(([label, value]) => { const dt = document.createElement('dt'), dd = document.createElement('dd'); dt.textContent = label; dd.textContent = value; return [dt, dd]; }));
+      }
+      fpsFrames++;
+      if (now - fpsStart >= 1000) { $('liveFps').textContent = '解析：' + (fpsFrames * 1000 / (now - fpsStart)).toFixed(1) + ' コマ/秒'; fpsFrames = 0; fpsStart = now; }
+      schedule();
+    }
+    schedule();
+  } catch (error) { stopCamera(); cameraError(error); }
+});
+$('nextShot').addEventListener('click', resetLive);
+$('hand').addEventListener('change', () => { resetLive(); draw(); });
+document.addEventListener('visibilitychange', () => { if (document.hidden) stopCamera(); });
+window.addEventListener('pagehide', stopCamera);
+resetLive();
+
+video.addEventListener('play', () => {
+  function update() {
+    if (video.paused || video.ended || state.tracking) return;
+    draw(); requestAnimationFrame(update);
+  }
+  requestAnimationFrame(update);
+});
